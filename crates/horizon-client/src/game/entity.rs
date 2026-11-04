@@ -1782,6 +1782,17 @@ impl Entity for ThrownTrident {
     fn selector_target(&self) -> Option<Target> {
         Some(Target::Trident(self.id))
     }
+    /// `ServerEntity.sendChanges`: piston movement bypasses the normal tick
+    /// motion delta, so request an immediate position and velocity update.
+    fn move_by_piston(&mut self, movement: Vec3) {
+        self.position = self.position.add_vector(movement);
+        self.needs_sync = true;
+    }
+    /// A slime piston changes velocity without advancing the trident tick.
+    fn piston_slime_bounce(&mut self, movement: Direction) {
+        self.velocity = piston_push::bounce_velocity(movement, self.velocity);
+        self.needs_sync = true;
+    }
     /// Like any arrow (`AbstractArrow.push`) not pushed while in the ground.
     fn pushed_by_explosion(&self) -> bool {
         !self.in_ground

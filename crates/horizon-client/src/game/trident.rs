@@ -28,6 +28,8 @@ pub(super) struct ThrownTrident {
     pub(super) position: Vec3,
     pub(super) previous: Vec3,
     pub(super) velocity: Vec3,
+    /// `ServerEntity.sendChanges`: send piston movement to tracked clients now.
+    pub(super) needs_sync: bool,
     pub(super) yaw: f32,
     pub(super) pitch: f32,
     pub(super) in_ground: bool,
@@ -118,6 +120,7 @@ impl ThrownTrident {
             position,
             previous: position,
             velocity: Vec3::ZERO,
+            needs_sync: false,
             yaw,
             pitch,
             in_ground: false,
@@ -463,6 +466,7 @@ impl Game<'_> {
             position: start,
             previous: start,
             velocity: projectile.velocity,
+            needs_sync: false,
             yaw: projectile.yaw,
             pitch: projectile.pitch,
             in_ground: false,
@@ -1087,8 +1091,9 @@ horizon_client::impl_joined!(ThrownTrident);
 
 #[cfg(test)]
 mod tests {
-    use super::breeze_deflect;
-    use horizon_core::geometry::Vec3;
+    use super::{ThrownTrident, breeze_deflect};
+    use crate::game::entity::Entity;
+    use horizon_core::geometry::{Direction, Vec3};
 
     /// `ProjectileDeflection.REVERSE` at power 1: half speed, the other way,
     /// and a turn of 170 degrees plus a fifth of the random draw.
@@ -1097,6 +1102,18 @@ mod tests {
         let (velocity, yaw) = breeze_deflect(Vec3::new(4.0, -2.0, 1.0), 10.0, 0.25);
         assert_eq!(velocity, Vec3::new(-2.0, 1.0, -0.5));
         assert_eq!(yaw, 185.0);
+    }
+
+    #[test]
+    fn piston_push_and_slime_bounce_request_immediate_trident_sync() {
+        let mut trident = ThrownTrident::remote(1, Vec3::new(0.0, 64.0, 0.0), 0.0, 0.0);
+        Entity::move_by_piston(&mut trident, Vec3::new(0.5, 0.0, 0.0));
+        assert_eq!(trident.position, Vec3::new(0.5, 64.0, 0.0));
+        assert!(trident.needs_sync);
+
+        trident.needs_sync = false;
+        Entity::piston_slime_bounce(&mut trident, Direction::Up);
+        assert!(trident.needs_sync);
     }
 
     /// A stack can reach its final durability point after use began. The release
