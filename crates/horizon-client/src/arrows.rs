@@ -383,7 +383,7 @@ impl ArrowScene<'_, '_> {
         Some((hit.location, hit.block, hit.direction.normal()))
     }
     /// `CollisionGetter.noCollision(null, box)` over blocks.
-    fn no_block_collision(&self, b: Aabb) -> bool {
+    pub fn no_block_collision(&self, b: Aabb) -> bool {
         let (lo, hi) = (b.min_position(), b.max_position());
         for x in (lo.x.floor() as i32 - 1)..=(hi.x.floor() as i32 + 1) {
             for y in (lo.y.floor() as i32 - 1)..=(hi.y.floor() as i32 + 1) {
@@ -536,6 +536,23 @@ fn signum(v: f64) -> f64 {
 pub fn tick(p: &mut Projectile, scene: &ArrowScene, targets: &[(Who, Aabb)]) -> (bool, Hit) {
     tick_with(p, scene, targets, true)
 }
+/// `AbstractArrow.move(MoverType.PISTON)` calls `shouldFall` after a piston
+/// move, then starts falling immediately if the arrow no longer collides.
+pub fn release_from_piston(p: &mut Projectile, no_block_collision: bool) -> bool {
+    if !no_block_collision {
+        return false;
+    }
+    let Some(mut state) = p.arrow.take() else {
+        return false;
+    };
+    if !state.in_ground {
+        p.arrow = Some(state);
+        return false;
+    }
+    start_falling(p, &mut state);
+    p.arrow = Some(state);
+    true
+}
 /// One arrow tick whose hit is canceled (`ProjectileImpactEvent`): the arrow
 /// flies through its full movement: not stuck, nothing hurt, no hit.
 pub fn tick_through(
@@ -636,6 +653,17 @@ pub fn finish_entity_hit(p: &mut Projectile, scene: &ArrowScene, outcome: Entity
     let keep = !st.removed;
     p.arrow = Some(st);
     keep
+}
+fn start_falling(p: &mut Projectile, state: &mut ArrowState) {
+    state.in_ground = false;
+    let velocity = p.velocity;
+    let x = f64::from(state.random.next_float() * 0.2);
+    let y = f64::from(state.random.next_float() * 0.2);
+    let z = f64::from(state.random.next_float() * 0.2);
+    p.velocity = Vec3::new(velocity.x * x, velocity.y * y, velocity.z * z);
+    state.life = 0;
+    p.stuck = false;
+    p.needs_sync = true;
 }
 struct Ticker<'p, 's, 'a, 'r> {
     p: &'p mut Projectile,
@@ -848,13 +876,7 @@ impl Ticker<'_, '_, '_, '_> {
     }
     /// `AbstractArrow.startFalling`.
     fn start_falling(&mut self) {
-        self.st.in_ground = false;
-        let v = self.p.velocity;
-        let x = f64::from(self.st.random.next_float() * 0.2);
-        let y = f64::from(self.st.random.next_float() * 0.2);
-        let z = f64::from(self.st.random.next_float() * 0.2);
-        self.p.velocity = Vec3::new(v.x * x, v.y * y, v.z * z);
-        self.st.life = 0;
+        start_falling(self.p, self.st);
     }
     /// `AbstractArrow.stepMoveAndHit`: the nearest entity on the way, else the
     /// block. A piercing arrow that hits an entity here goes on from it next
@@ -1554,5 +1576,42 @@ impl WaterSplashWorld for Ticker<'_, '_, '_, '_> {
     fn splash_event(&mut self) -> Result<(), Error> {
         self.st.events.push(ArrowEvent::SplashEvent);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn piston_release_only_starts_falling_when_block_collision_is_clear() {
+        let mut projectile = Projectile::new(
+            crate::projectiles::ProjectileKind::Arrow {
+                base_damage: 2.0,
+                critical: false,
+                effect: None,
+            },
+            Vec3::ZERO,
+            None,
+        );
+        projectile.velocity = Vec3::new(1.0, -2.0, 3.0);
+        projectile.stuck = true;
+        projectile.arrow.as_mut().unwrap().in_ground = true;
+
+        assert!(!release_from_piston(&mut projectile, false));
+        assert!(projectile.stuck);
+        assert!(!projectile.needs_sync);
+
+        let mut random = projectile.arrow.as_ref().unwrap().random.clone();
+        let expected = Vec3::new(
+            f64::from(random.next_float() * 0.2),
+            -2.0 * f64::from(random.next_float() * 0.2),
+            3.0 * f64::from(random.next_float() * 0.2),
+        );
+        assert!(release_from_piston(&mut projectile, true));
+        assert!(!projectile.stuck);
+        assert!(projectile.needs_sync);
+        assert_eq!(projectile.velocity, expected);
+        assert_eq!(projectile.arrow.as_ref().unwrap().life, 0);
     }
 }

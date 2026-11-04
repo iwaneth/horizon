@@ -1500,6 +1500,13 @@ impl Entity for ThrownTrident {
         Ok(())
     }
     stored_motion!();
+    fn move_by_piston(&mut self, movement: Vec3) {
+        ThrownTrident::move_by_piston(self, movement);
+    }
+    fn piston_slime_bounce(&mut self, movement: Direction) {
+        self.velocity = piston_push::bounce_velocity(movement, self.velocity);
+        self.needs_sync = true;
+    }
     fn portal_size(&self) -> Option<(f32, f32)> {
         Some((0.5, 0.5))
     }

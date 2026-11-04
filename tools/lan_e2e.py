@@ -382,7 +382,7 @@ CHECKS = ['tab', 'self', 'armour', 'nametags', 'walls', 'chest', 'menu-transfer'
           'flow-push', 'bubble-column', 'arrows', 'projectile-vehicles', 'flame-arrows', 'kills', 'looting', 'leave', 'hurt', 'looks', 'leads', 'entity-tags', 'respawn', 'containers', 'names', 'feedback', 'titles', 'chat', 'styles',
           'commands', 'recipes', 'machines', 'brewing', 'loom', 'stonecutter', 'grindstone', 'anvil', 'smithing',
           'enchanting', 'beacon', 'crafter', 'lectern', 'cartography', 'trials', 'clicks', 'shift-double-click', 'recipe-shift', 'shift-drag', 'modifier-release', 'wheel', 'sleep', 'sleep-villager', 'bed-occupied', 'sleep-reload', 'predict', 'push',
-          'piston-push', 'piston-entities', 'piston-slime', 'piston-slide', 'eat', 'eat-on-block', 'cauldron', 'eating', 'xp', 'objects', 'projectiles', 'thrown', 'sparks', 'hud', 'sidebar', 'border', 'particles',
+          'piston-push', 'piston-entities', 'piston-projectiles', 'piston-slide', 'piston-slime', 'eat', 'eat-on-block', 'cauldron', 'eating', 'xp', 'objects', 'projectiles', 'thrown', 'sparks', 'hud', 'sidebar', 'border', 'particles',
           'worn', 'blast', 'blast-projectiles', 'barter', 'piglin_offspring', 'deflect', 'fireball', 'light', 'time', 'swings', 'cracks', 'plates', 'plate-projectiles', 'effects',
           'portals', 'distance', 'growth', 'doors', 'flight', 'ladder', 'boats', 'boat_ice_reboard', 'boat_shoved', 'minecarts', 'frames', 'hands',
           'lightning', 'riding', 'occupied_horse', 'mounts', 'worldspawn', 'beds', 'shield', 'deathmining', 'contacts', 'absorption',
@@ -3572,6 +3572,98 @@ def check_piston_entities(host, guest, out):
     for kind in kinds:
         results[kind] = after[kind] - before[kind]
         assert results[kind] > 0.3, f'piston did not push {kind}: {before[kind]} -> {after[kind]}'
+    return results
+
+
+def check_piston_projectiles(host, guest, out):
+    """Piston-released arrows and tridents start falling on the server and guest."""
+    hx, _, hz = pos_of(host)
+    x, y, z = (int(hx // 16) * 16 + 8, 100, int(hz // 16) * 16 + 8)
+    results = {}
+
+    def find_projectile(entities, kind, entity_id=None):
+        for entity in entities:
+            if entity_id is not None and entity.get('id') != entity_id:
+                continue
+            if kind not in str(entity.get('kind', '')).lower():
+                continue
+            position = entity.get('position', [0, 0, 0])
+            if entity_id is not None or (
+                abs(position[0] - x) < 5 and abs(position[2] - z - 0.5) < 0.6
+            ):
+                return entity
+        return None
+
+    def synchronized_projectiles(kind, entity_id):
+        for _ in range(30):
+            server = host.raw('simulation')
+            client = guest.raw('simulation')
+            if server['game_time'] == client['game_time']:
+                return (
+                    find_projectile(server['projectiles'], kind, entity_id),
+                    find_projectile(client['projectiles'], kind, entity_id),
+                    server['game_time'],
+                )
+            time.sleep(0.01)
+        raise AssertionError(f'host and guest did not reach the same tick for {kind}')
+
+    for player in (host, guest):
+        player('command', command='gamemode spectator')
+    host('command', command=f'tp @s {x+6.5} {y} {z+3.5}')
+    host('command', command=f'tp {GUEST_NAME} {x+6.5} {y} {z-3.5}')
+    try:
+        for kind in ('arrow', 'trident'):
+            host('command', command='tick unfreeze')
+            host('command', command='kill @e[tag=horizon_piston_projectile]')
+            host('command', command=f'fill {x-4} {y} {z-4} {x+7} {y+5} {z+4} minecraft:air')
+            host('command', command=f'setblock {x} {y} {z} minecraft:piston[facing=east]')
+            host('command', command=f'setblock {x+1} {y} {z} minecraft:slime_block')
+            host('command', command=f'summon minecraft:{kind} {x+3.5} {y+0.5} {z+0.5} '
+                  '{Motion:[-1.0,0.0,0.0],Tags:["horizon_piston_projectile"]}')
+            host.wait(15)
+            guest.wait(15)
+            before = find_projectile(host.raw('simulation')['projectiles'], kind)
+            assert before, f'{kind} did not reach the server simulation before the piston push'
+            assert max(abs(v) for v in before.get('velocity', [0, 0, 0])) < 1e-6, \
+                f'{kind} did not stick in the slime block: {before}'
+            entity_id = before['id']
+
+            host('command', command='tick freeze')
+            host('command', command=f'setblock {x-1} {y} {z} minecraft:redstone_block')
+            for _ in range(3):
+                host('command', command='tick step 1')
+                guest.wait(1)
+            server = find_projectile(host.raw('simulation')['projectiles'], kind, entity_id)
+            assert server, f'{kind} disappeared from the server simulation'
+            assert server['position'][0] > before['position'][0] + 0.05, \
+                f'server {kind} was not carried by the piston: {before} -> {server}'
+
+            host('command', command='tick unfreeze')
+            host.wait(3)
+            guest.wait(3)
+            samples = []
+            for _ in range(3):
+                server, client, game_time = synchronized_projectiles(kind, entity_id)
+                assert server and server['velocity'][1] < -0.01, \
+                    f'server {kind} did not resume flight after the piston push: {server}'
+                assert client and client['velocity'][1] < -0.01, \
+                    f'guest {kind} did not receive the released flight state: {client}'
+                drift = max(abs(a - b) for a, b in zip(server['position'], client['position']))
+                samples.append({'game_time': game_time, 'drift': drift})
+                assert drift < 0.1, \
+                    f'guest {kind} diverged from the server after piston release: {server} vs {client}'
+                host.wait(1)
+                guest.wait(1)
+            results[kind] = samples
+            host('command', command=f'setblock {x-1} {y} {z} minecraft:air')
+            host.wait(10)
+    finally:
+        host('command', command='tick unfreeze')
+        host('command', command='kill @e[tag=horizon_piston_projectile]')
+        for pos in ((x - 1, y, z), (x, y, z), (x + 1, y, z), (x + 2, y, z)):
+            host('command', command=f'setblock {pos[0]} {pos[1]} {pos[2]} minecraft:air')
+        for player in (host, guest):
+            player('command', command='gamemode creative')
     return results
 
 
@@ -7008,6 +7100,7 @@ CHECK_FNS = {'tab': check_tab, 'self': check_self, 'armour': check_armour,
              'modifier-release': check_modifier_release,
              'bed-occupied': check_bed_occupied, 'sleep-reload': check_sleep_reload,
              'push': check_push, 'piston-push': check_piston_push, 'piston-entities': check_piston_entities,
+             'piston-projectiles': check_piston_projectiles,
              'piston-slime': check_piston_slime,
              'eat': check_eat, 'eat-on-block': check_eat_on_block, 'cauldron': check_cauldron, 'eating': check_eating, 'xp': check_xp,
              'objects': check_objects, 'projectiles': check_projectiles, 'blast': check_blast, 'blast-projectiles': check_blast_projectiles,

@@ -540,8 +540,48 @@ impl Game<'_> {
                 }
             }
             Target::Entity(handle) => {
-                with_entity_mut!(self, handle, entity => entity.move_by_piston(movement))
+                with_entity_mut!(self, handle, entity => entity.move_by_piston(movement));
+                self.release_piston_projectile(handle);
             }
+        }
+    }
+
+    fn release_piston_projectile(&mut self, handle: EntityHandle) {
+        match handle {
+            EntityHandle::Projectile(i) => {
+                let projectile = &self.creatures.projectiles[i];
+                if !projectile
+                    .arrow
+                    .as_ref()
+                    .is_some_and(|arrow| arrow.in_ground)
+                {
+                    return;
+                }
+                let at = projectile.position;
+                let clear = {
+                    let rain = self.arrow_rain();
+                    self.arrow_scene(&rain)
+                        .no_block_collision(Aabb::new(at, at).inflate(Vec3::new(0.06, 0.06, 0.06)))
+                };
+                horizon_client::arrows::release_from_piston(
+                    &mut self.creatures.projectiles[i],
+                    clear,
+                );
+            }
+            EntityHandle::Trident(i) => {
+                let trident = &self.tridents[i];
+                if !trident.in_ground || trident.no_physics {
+                    return;
+                }
+                let at = trident.position;
+                let clear = {
+                    let rain = self.arrow_rain();
+                    self.arrow_scene(&rain)
+                        .no_block_collision(Aabb::new(at, at).inflate(Vec3::new(0.06, 0.06, 0.06)))
+                };
+                self.tridents[i].release_if_unblocked(clear);
+            }
+            _ => {}
         }
     }
 

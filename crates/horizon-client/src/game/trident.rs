@@ -32,6 +32,8 @@ pub(super) struct ThrownTrident {
     pub(super) pitch: f32,
     pub(super) in_ground: bool,
     in_ground_time: u32,
+    last_state: Option<horizon_world::registry::BlockStateId>,
+    pub needs_sync: bool,
     /// `AbstractArrow.shakeTime`: seven ticks after sticking, no pickup.
     shake: u32,
     dealt_damage: bool,
@@ -122,6 +124,8 @@ impl ThrownTrident {
             pitch,
             in_ground: false,
             in_ground_time: 0,
+            last_state: None,
+            needs_sync: false,
             shake: 0,
             dealt_damage: false,
             loyalty: 0,
@@ -137,6 +141,38 @@ impl ThrownTrident {
             guest: None,
             deflected_by: None,
         }
+    }
+    fn check_fall(
+        &mut self,
+        state: horizon_world::registry::BlockStateId,
+        no_collision: bool,
+    ) -> bool {
+        let should_fall = self.in_ground && self.last_state != Some(state) && no_collision;
+        if should_fall {
+            self.start_falling();
+        }
+        should_fall
+    }
+    pub(super) fn release_if_unblocked(&mut self, no_collision: bool) -> bool {
+        if !self.in_ground || self.no_physics || !no_collision {
+            return false;
+        }
+        self.start_falling();
+        true
+    }
+    fn start_falling(&mut self) {
+        self.in_ground = false;
+        self.in_ground_time = 0;
+        let velocity = self.velocity;
+        let x = f64::from(self.random.next_float() * 0.2);
+        let y = f64::from(self.random.next_float() * 0.2);
+        let z = f64::from(self.random.next_float() * 0.2);
+        self.velocity = Vec3::new(velocity.x * x, velocity.y * y, velocity.z * z);
+        self.needs_sync = true;
+    }
+    pub(super) fn move_by_piston(&mut self, movement: Vec3) {
+        self.position = self.position.add_vector(movement);
+        self.needs_sync = true;
     }
     /// `ThrownTrident.tick`'s Loyalty return: pulled up and towards the
     /// owner's eye.
@@ -252,6 +288,7 @@ impl Game<'_> {
             })
             .unwrap_or_else(|| self.items().get(&stack.item).map_or(250, |i| i.max_damage))
     }
+
     /// `TridentItem.use`: start the throw unless one more use would break it.
     pub(super) fn use_trident(&mut self, stack: &ItemStack) -> bool {
         if &*stack.item != "minecraft:trident" {
@@ -465,6 +502,8 @@ impl Game<'_> {
             pitch: projectile.pitch,
             in_ground: false,
             in_ground_time: 0,
+            last_state: None,
+            needs_sync: false,
             shake: 0,
             dealt_damage: false,
             no_physics: false,
@@ -643,9 +682,19 @@ impl Game<'_> {
             }
             let stuck_tick = t.in_ground && !t.no_physics;
             if t.in_ground {
+                let at = t.position;
+                let pos = BlockPos::containing(at);
+                let state = self.world.block(pos.x, pos.y, pos.z);
+                let clear = if t.last_state != Some(state) {
+                    let rain = self.arrow_rain();
+                    self.arrow_scene(&rain)
+                        .no_block_collision(Aabb::new(at, at).inflate(Vec3::new(0.06, 0.06, 0.06)))
+                } else {
+                    false
+                };
+                t.check_fall(state, clear);
                 t.in_ground_time += 1;
                 if !t.no_physics {
-                    let at = t.position;
                     self.trident_block_effects(&mut t, at, at);
                 }
             } else if t.no_physics {
@@ -876,6 +925,8 @@ impl Game<'_> {
                         t.position = stop;
                         t.velocity = Vec3::ZERO;
                         t.in_ground = true;
+                        let pos = BlockPos::new(block.x, block.y, block.z);
+                        t.last_state = Some(self.world.block(pos.x, pos.y, pos.z));
                         t.shake = 7;
                         self.audio.play(
                             "minecraft:item.trident.hit_ground",
@@ -1143,5 +1194,54 @@ mod tests {
         assert_eq!(game.tridents.len(), 1);
         assert_eq!(game.tridents[0].stack.damage, 250);
         assert!(game.held().is_none());
+    }
+
+    #[test]
+    fn a_trident_releases_from_a_moved_block_and_requests_a_sync() {
+        use super::*;
+
+        let mut trident = ThrownTrident::remote(42, Vec3::ZERO, 0.0, 0.0);
+        trident.in_ground = true;
+        trident.last_state = Some(horizon_world::registry::BlockStateId(1));
+        trident.velocity = Vec3::new(1.0, 2.0, -3.0);
+
+        assert!(!trident.check_fall(horizon_world::registry::BlockStateId(2), false));
+        assert!(trident.in_ground);
+        assert!(!trident.needs_sync);
+
+        let mut random = horizon_core::random::LegacyRandom::new(42);
+        let expected = Vec3::new(
+            f64::from(random.next_float() * 0.2),
+            2.0 * f64::from(random.next_float() * 0.2),
+            -3.0 * f64::from(random.next_float() * 0.2),
+        );
+        assert!(trident.check_fall(horizon_world::registry::BlockStateId(2), true));
+        assert!(!trident.in_ground);
+        assert!(trident.needs_sync);
+        assert_eq!(trident.velocity, expected);
+    }
+
+    #[test]
+    fn a_piston_move_releases_a_trident_only_when_block_collision_is_clear() {
+        use super::*;
+
+        let mut trident = ThrownTrident::remote(42, Vec3::ZERO, 0.0, 0.0);
+        trident.in_ground = true;
+        trident.velocity = Vec3::new(1.0, -2.0, 3.0);
+
+        assert!(!trident.release_if_unblocked(false));
+        assert!(trident.in_ground);
+        assert!(!trident.needs_sync);
+
+        let mut random = horizon_core::random::LegacyRandom::new(42);
+        let expected = Vec3::new(
+            f64::from(random.next_float() * 0.2),
+            -2.0 * f64::from(random.next_float() * 0.2),
+            3.0 * f64::from(random.next_float() * 0.2),
+        );
+        assert!(trident.release_if_unblocked(true));
+        assert!(!trident.in_ground);
+        assert!(trident.needs_sync);
+        assert_eq!(trident.velocity, expected);
     }
 }
