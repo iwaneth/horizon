@@ -54,6 +54,20 @@ fn normalising_catches_the_usual_disguises() {
 }
 
 #[test]
+fn letterlike_symbols_are_folded() {
+    let f = filter();
+    for text in ["𝓃𝒾ℊℊℯ𝓇", "ℕ𝕀𝔾𝔾𝔼ℝ", "ℕIGGER"] {
+        assert!(f.matches(text), "{text:?} should be refused");
+    }
+    assert_eq!(
+        normalise::word("ℂℊℋℌℍℎℐℑℒℓℕℙℚℛℜℝℤℨℬℭℯℰℱℳℴℹⅅⅆⅇⅈⅉK"),
+        normalise::word("cghhhhiillnpqrrrzzbceefmoiddeijk")
+    );
+    assert!(!f.matches("ℕiger"));
+    assert!(!f.matches("ℎℯℓℓℴ"));
+}
+
+#[test]
 fn ordinary_words_pass() {
     let f = filter();
     for text in [
