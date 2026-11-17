@@ -60,8 +60,8 @@ fn letterlike_symbols_are_folded() {
         assert!(f.matches(text), "{text:?} should be refused");
     }
     assert_eq!(
-        normalise::word("ℂℊℋℌℍℎℐℑℒℓℕℙℚℛℜℝℤℨℬℭℯℰℱℳℴℹⅅⅆⅇⅈⅉ"),
-        normalise::word("cghhhhiillnpqrrrzzbceefmoiddeij")
+        normalise::word("ℂℊℋℌℍℎℐℑℒℓℕℙℚℛℜℝℤℨℬℭℯℰℱℳℴℹⅅⅆⅇⅈⅉK"),
+        normalise::word("cghhhhiillnpqrrrzzbceefmoiddeijk")
     );
     assert!(!f.matches("ℕiger"));
     assert!(!f.matches("ℎℯℓℓℴ"));
